@@ -34,7 +34,7 @@ class FrameCorners:
     (np.searchsorted).
     """
 
-    __slots__ = ('_ids', '_points', '_sizes')
+    __slots__ = ('_ids', '_points', '_sizes', 'max_reserved_id')
 
     def __init__(self, ids, points, sizes):
         """
@@ -50,6 +50,7 @@ class FrameCorners:
         self._ids = ids[sorting_idx].reshape(-1, 1)
         self._points = points[sorting_idx].reshape(-1, 2)
         self._sizes = sizes[sorting_idx].reshape(-1, 1)
+        self.max_reserved_id = len(self._ids)
 
     @property
     def ids(self):
@@ -63,10 +64,19 @@ class FrameCorners:
     def sizes(self):
         return self._sizes
 
+    def set_points(self, points):
+        self._points = points
+
     def __iter__(self):
         yield self.ids
         yield self.points
         yield self.sizes
+
+    def new_points(self, points, size_of_point):
+        self._ids = np.concatenate((self._ids.flatten(), np.array(np.arange(self.max_reserved_id, self.max_reserved_id + len(points))))).reshape(-1, 1)
+        self.max_reserved_id += len(points)
+        self._points = np.concatenate((self._points, points.reshape(-1, 2)))
+        self._sizes = np.concatenate((self._sizes.flatten(), np.array([size_of_point] * len(points)))).reshape(-1, 1)
 
 
 def filter_frame_corners(frame_corners: FrameCorners,
@@ -268,6 +278,8 @@ def create_cli(build):
         FRAME_SEQUENCE path to a video file or shell-like wildcard describing
         multiple images
         """
+        import os
+        print(os.curdir)
         sequence = frameseq.read_grayscale_f32(frame_sequence)
         if file_to_load is not None:
             corner_storage = load(file_to_load)
