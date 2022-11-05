@@ -202,7 +202,12 @@ def triangulate_correspondences(correspondences: Correspondences,
     points3d = cv2.triangulatePoints(view_mat_1, view_mat_2,
                                      normalized_points2d_1.T,
                                      normalized_points2d_2.T)
+
+    #print(f"triangle points: {points3d}")
+
     points3d = cv2.convertPointsFromHomogeneous(points3d.T).reshape(-1, 3)
+
+    #print(f"triangle points HOMO: {points3d}")
 
     reprojection_error_mask = _calc_reprojection_error_mask(
         points3d,
@@ -224,6 +229,8 @@ def triangulate_correspondences(correspondences: Correspondences,
         parameters.min_triangulation_angle_deg
     )
     common_mask = reprojection_error_mask & z_mask & angle_mask
+
+    #print(f"triangle mask: {common_mask}")
 
     return points3d[common_mask], correspondences.ids[common_mask], median_cos
 
@@ -289,6 +296,15 @@ class PointCloudBuilder:
         self.points[idx_1] = points[idx_2]
         self._ids = np.vstack((self.ids, np.delete(ids, idx_2, axis=0)))
         self._points = np.vstack((self.points, np.delete(points, idx_2, axis=0)))
+        self._sort_data()
+
+    def remove_points(self, ids_to_remove: np.ndarray) -> None:
+        self._ids = np.delete(self.ids, ids_to_remove, axis = 0)
+        self._points = np.delete(self.points, ids_to_remove, axis = 0)
+
+        if (not (self.colors is None)):
+            self._colors = np.delete(self.colors, ids_to_remove, axis = 0)
+
         self._sort_data()
 
     def set_colors(self, colors: np.ndarray) -> None:
