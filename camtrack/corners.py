@@ -52,9 +52,9 @@ def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
     image_0 = frame_sequence[0]
     max_quantity_corners = 1000
-    quality_level = 0.1
-    min_distance = 1
-    size_of_point = 10
+    quality_level = 0.1#0.05
+    min_distance = 5 #10
+    size_of_point = 12
     points = cv2.goodFeaturesToTrack(
         image=image_0,
         maxCorners=max_quantity_corners,
@@ -81,7 +81,7 @@ def _build_impl(frame_sequence: pims.FramesSequence,
         if len(corners.ids) < max_quantity_corners:
             mask = np.ones(image_1.shape, dtype=np.uint8)
             for point in points:
-                mask = cv2.circle(mask, _to_int_tuple(point), size_of_point, 0, -1)
+                mask = cv2.circle(mask, _to_int_tuple(point), min_distance, 0, -1)
             new_points = cv2.goodFeaturesToTrack(
                 image=image_1,
                 maxCorners=max_quantity_corners - len(points),

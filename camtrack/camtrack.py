@@ -73,44 +73,36 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
     view_mats = np.full(len(corner_storage), None)
     view_known_1, view_known_2 = pose_to_view_mat3x4(known_view_1[1]), pose_to_view_mat3x4(known_view_2[1])
     view_mats[close] = view_known_1, view_known_2
-    params = TriangulationParameters(1, 1, 0.2)
+    params = TriangulationParameters(0.7, 1, 0.2)
     correspondences = build_correspondences(corner_storage[frame1], corner_storage[frame2])
     points_3d, correspondence_ids, med_cos = triangulate_correspondences(correspondences, view_known_1, view_known_2,
                                                                          intrinsic_mat, params)
     point_cloud_builder = PointCloudBuilder(correspondence_ids, points_3d)
 
-    '''
-    def choice(open_, step=(frame2 - frame1) if (frame2 - frame1) > 7 else 7):
-        l_ = None
-        r_ = None
-        prev = None
-        for i in open_:
-            if i == 0:
-                prev = 0
-                continue
-            elif prev is None:
-                prev = i
-                l_ = i - 1
-                continue
-            if i != prev + 1:
-                if l_ is None:
-                    l_ = i - 1
-                else:
-                    r_ = i - 1
-            prev = i
-        if r_ is None:
-            r_ = l_
-        if r_ < len(open_) - step - 1:
-            return r_ + step
-        return np.random.choice(open_)
-    '''
+    def choice(open_, f1, f2, step=(frame2 - frame1) // 2 if (frame2 - frame1) > 15 else 7):
+        f1, f2 = min(f1, f2), max(f1, f2)
+        lf1, rf1 = max(0, f1 - step), min(len(open_) - 1, f1 + step)
+        lf2, rf2 = max(0, f2 - step), min(len(open_) - 1, f2 + step)
+        diff1 = np.setdiff1d(np.arange(lf1, rf1), open_)
+        inte1 = np.intersect1d(np.arange(lf1, rf1), open_)
+        diff2 = np.setdiff1d(np.arange(lf2, rf2), open_)
+        inte2 = np.intersect1d(np.arange(lf2, rf2), open_)
+        if 2 * (len(diff1) + len(diff2)) > rf1 + rf2 - lf1 - lf2:
+            step *= 2
+        choi1 = np.setdiff1d(inte1, diff1)
+        choi2 = np.setdiff1d(inte2, diff2)
+        if len(choi1) == 0:
+            if len(choi2) == 0:
+                return np.random.choice(open_), 2*step
+            return np.random.choice(choi2), step
+        return np.random.choice(np.append(choi1, choi2)), step
 
     is_enough = 0
     while len(open) > 0:
         open_ = copy.deepcopy(open)
         success = False
         while not success and len(open_) > 0:
-            selected_frame = np.random.choice(open_) # choice(open_)
+            selected_frame, step_ = choice(open_, frame1, frame2, abs(frame2 - frame1) // 2) #np.random.choice(open_) #
             print(f"selected frame: {selected_frame}")
             selected_points_ids = np.intersect1d(point_cloud_builder.ids, corner_storage[selected_frame].ids)
 
