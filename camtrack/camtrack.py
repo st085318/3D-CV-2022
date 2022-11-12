@@ -9,6 +9,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 import copy
 import cv2
+import itertools
+import scipy
 
 from corners import CornerStorage
 from data3d import CameraParameters, PointCloud, Pose
@@ -38,10 +40,66 @@ def triangulate_points_on_two_frames(frame_1: int, frame_2: int, corner_storage:
     return ids, points3d
 
 
+def calc_full_mat(frame: int, view_mats: List[np.ndarray], intrinsic_mat: np.ndarray):
+    K = np.zeros((4, 4))
+    K[: 3, : 3] = intrinsic_mat
+    K[2][2] = 0
+    K[2][3] = 1
+    K[3][2] = 1
+    cam_mat = np.vstack((view_mats[frame].astype(float), np.array([0, 0, 0, 1], dtype=float)))
+    return K @ cam_mat
+
+
+def triangulate_points_on_multiple_frames(frame_ids: np.ndarray, corner_storage: CornerStorage, view_mats: List[np.ndarray],
+                                          intrinsic_mat: np.ndarray, params: TriangulationParameters,
+                                          frames_cnt_threshold: int = 7) -> Tuple[np.ndarray, np.ndarray]:
+
+    frames_per_point = {}
+    for i, j in itertools.combinations(frame_ids, 2):
+        p_ids, _ = triangulate_points_on_two_frames(i, j, corner_storage, view_mats, intrinsic_mat, params)
+        for id in p_ids:
+            if not(id in frames_per_point):
+                frames_per_point[id] = set()
+            frames_per_point[id].add(i)
+            frames_per_point[id].add(j)
+
+    full_mats = {}
+    for frame in frame_ids:
+        full_mats[frame] = calc_full_mat(frame, view_mats, intrinsic_mat)
+
+    ids, points3d = [], []
+    for point in frames_per_point:
+        if len(frames_per_point[point]) < frames_cnt_threshold:
+            continue
+
+
+        sq_sys = []
+        for frame in frames_per_point[point]:
+            ind_of_point_in_cs = corner_storage[frame].ids.tolist().index(point)
+            fm = full_mats.get(frame)
+            sq_sys.append(fm[3] * corner_storage[frame].points[ind_of_point_in_cs][0] - fm[0])
+            sq_sys.append(fm[3] * corner_storage[frame].points[ind_of_point_in_cs][1] - fm[1])
+
+        sq_sys = np.array(sq_sys)
+        coordinates = scipy.linalg.lstsq(sq_sys[:, : 3], -sq_sys[:, 3], lapack_driver="gelsy", check_finite = False)[0]
+
+        ids.append(point)
+        points3d.append(coordinates)
+
+    return np.array(ids).astype(np.int64), np.array(points3d)
+
+
 # reminder: think about weight
 def get_best_points_for_frames(frame: int, frames: List[int], corner_storage: CornerStorage,
-                              view_mats: List[np.ndarray], intrinsic_mat: np.ndarray, params: TriangulationParameters, weight = 3) \
+                              view_mats: List[np.ndarray], intrinsic_mat: np.ndarray, params: TriangulationParameters, recount=False,
+                               weight=5) \
         -> Tuple[np.ndarray, np.ndarray]:
+    if recount:
+        print(f"        Retreangulation")
+        best_ids, best_points = triangulate_points_on_multiple_frames(np.append(frame, frames), corner_storage, view_mats,
+                                                                      intrinsic_mat, params)
+        return best_ids, best_points
+
     best_ids, best_points = triangulate_points_on_two_frames(frame, frames[0], corner_storage, view_mats, intrinsic_mat, params)
     bi, bp = triangulate_points_on_two_frames(frame, frames[1], corner_storage, view_mats, intrinsic_mat, params)
     if len(bi) > len(best_ids):
@@ -50,8 +108,7 @@ def get_best_points_for_frames(frame: int, frames: List[int], corner_storage: Co
     for f in frames[2:]:
         ids, points = triangulate_points_on_two_frames(frame, f, corner_storage, view_mats, intrinsic_mat, params)
         if len(ids) > weight * len(best_ids):
-            best_ids = ids
-            best_points = points
+            best_ids, best_points = ids, points
     return best_ids, best_points
 
 
@@ -79,7 +136,9 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
                                                                          intrinsic_mat, params)
     point_cloud_builder = PointCloudBuilder(correspondence_ids, points_3d)
 
-    def choice(open_, f1, f2, step=(frame2 - frame1) // 2 if (frame2 - frame1) > 15 else 7):
+    def choice(open_, f1, f2, step=(frame2 - frame1) // 2 if (frame2 - frame1) > 15 else 7, is_enough=0):
+        if is_enough:
+            return open_[0], step
         f1, f2 = min(f1, f2), max(f1, f2)
         lf1, rf1 = max(0, f1 - step), min(len(open_) - 1, f1 + step)
         lf2, rf2 = max(0, f2 - step), min(len(open_) - 1, f2 + step)
@@ -97,12 +156,16 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
             return np.random.choice(choi2), step
         return np.random.choice(np.append(choi1, choi2)), step
 
+    conf = 0.99
     is_enough = 0
+    delta_rec = 0
     while len(open) > 0:
         open_ = copy.deepcopy(open)
+        recount = False
         success = False
+        step_ = abs(frame2 - frame1) // 2
         while not success and len(open_) > 0:
-            selected_frame, step_ = choice(open_, frame1, frame2, abs(frame2 - frame1) // 2) #np.random.choice(open_) #
+            selected_frame, step_ = choice(open_, frame1, frame2, step_, is_enough) #np.random.choice(open_) #
             print(f"selected frame: {selected_frame}")
             selected_points_ids = np.intersect1d(point_cloud_builder.ids, corner_storage[selected_frame].ids)
 
@@ -118,22 +181,25 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
                                                               selected_points_2d.astype('float32'),
                                                               intrinsic_mat, None,
                                                               reprojectionError=params.max_reprojection_error,
-                                                              confidence=0.99)
+                                                              confidence=conf)
 
             if not(inliers is None):
                 outliers = np.setdiff1d(np.arange(0, len(selected_points_3d)), inliers.T, assume_unique=True)
-                # I think it is nice but works so slow
-                #if len(outliers) > 0.1 * len(selected_points_3d) and not(is_enough):
-                #    success = False
+                if len(outliers) > 0.2 * len(selected_points_3d) and delta_rec >= 0.2 * (len(open) + len(close)) and success:
+                    recount = True
+                    delta_rec = 0
                 #if is_enough:
                 # point_cloud_builder.remove_points(outliers)
                 point_cloud_builder.remove_points(outliers)
 
             if success:
                 print(f"    success: {selected_frame}")
+                conf = 0.99
+                is_enough = 0
                 view_mats[selected_frame] = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
                 ids, points3d = get_best_points_for_frames(selected_frame, close, corner_storage, view_mats,
-                                                          intrinsic_mat, params)
+                                                          intrinsic_mat, params, recount)
+                delta_rec += 1
                 point_cloud_builder.add_points(ids, points3d)
 
             else:
@@ -144,8 +210,14 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
         if len(open_) == 0 and not success:
             if not(is_enough):
                 is_enough = 1
+                open_ = copy.deepcopy(open)
                 continue
+            if conf > 0.1:
+                conf -= 0.05
+                continue
+            print("SOMETHING WENT WRONG :(")
             break
+
         is_enough = 0
         print(f"{len(close)} / {len(open) + len(close)} frames done")
         open = np.delete(open, np.where(open == selected_frame))
