@@ -112,25 +112,61 @@ def get_best_points_for_frames(frame: int, frames: List[int], corner_storage: Co
     return best_ids, best_points
 
 
+def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat):
+    ratio = []
+    step = 10 if len(corner_storage) > 50 else 2
+
+    for i in range(0, len(corner_storage), step):
+        frame1 = i
+        for j in range(i + step, len(corner_storage), step):
+            frame2 = j
+
+            corrs = build_correspondences(corner_storage[frame1], corner_storage[frame2])
+            E, inliers_essential = cv2.findEssentialMat(corrs.points_1, corrs.points_2,
+                                                     intrinsic_mat, method=cv2.RANSAC)
+            H, inliers_homography = cv2.findHomography(corrs.points_1, corrs.points_2, method=cv2.RANSAC)
+            if inliers_homography.sum() >= inliers_essential.sum() * 0.7:
+                continue
+            counts, R, t, _ = cv2.recoverPose(E, corrs.points_1, corrs.points_2, intrinsic_mat)
+            ratio.append((i, j, counts, R, t))
+
+    ratio = sorted(ratio, key=lambda x: x[2])
+    for i in range(len(ratio)):
+        if ratio[i][2] == ratio[-1][2]:
+            edge = i
+            break
+    ratio = ratio[edge:]
+    ratio = sorted(ratio, key=lambda x: x[1] - x[0])
+    frame1, frame2, _, R, t = ratio[len(ratio) // 2]
+
+    known_view_1 = (frame1, Pose(r_mat=np.eye(3, ), t_vec=np.zeros(3, )))
+    known_view_2 = (frame2, Pose(R, -R @ t))
+
+    return known_view_1, known_view_2
+
+
 def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: CornerStorage, frame_sequence_path: str,
                           known_view_1: Optional[Tuple[int, Pose]] = None, known_view_2: Optional[Tuple[int, Pose]] = None) \
         -> Tuple[List[Pose], PointCloud]:
-    if known_view_1 is None or known_view_2 is None:
-        raise NotImplementedError()
-
     rgb_sequence = frameseq.read_rgb_f32(frame_sequence_path)
     intrinsic_mat = to_opencv_camera_mat3x3(
         camera_parameters,
         rgb_sequence[0].shape[0]
     )
+    if known_view_1 is None or known_view_2 is None:
+        known_view_1, known_view_2 = calc_init_frames(corner_storage, intrinsic_mat)
 
     frame1, frame2 = known_view_1[0], known_view_2[0]
+    print(frame1)
+    print(frame2)
     close = [frame1, frame2]
     open = np.delete(np.arange(len(corner_storage)), close)
     view_mats = np.full(len(corner_storage), None)
     view_known_1, view_known_2 = pose_to_view_mat3x4(known_view_1[1]), pose_to_view_mat3x4(known_view_2[1])
     view_mats[close] = view_known_1, view_known_2
-    params = TriangulationParameters(0.7, 1, 0.2)
+
+    params = TriangulationParameters(1, 5, 0)
+
     correspondences = build_correspondences(corner_storage[frame1], corner_storage[frame2])
     points_3d, correspondence_ids, med_cos = triangulate_correspondences(correspondences, view_known_1, view_known_2,
                                                                          intrinsic_mat, params)
@@ -140,8 +176,8 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
         if is_enough:
             return open_[0], step
         f1, f2 = min(f1, f2), max(f1, f2)
-        lf1, rf1 = max(0, f1 - step), min(len(open_) - 1, f1 + step)
-        lf2, rf2 = max(0, f2 - step), min(len(open_) - 1, f2 + step)
+        lf1, rf1 = max(0, f1), min(len(open_) - 1, f1 + step)
+        lf2, rf2 = max(0, f2 - step), min(len(open_) - 1, f2)
         diff1 = np.setdiff1d(np.arange(lf1, rf1), open_)
         inte1 = np.intersect1d(np.arange(lf1, rf1), open_)
         diff2 = np.setdiff1d(np.arange(lf2, rf2), open_)
@@ -167,6 +203,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
         while not success and len(open_) > 0:
             selected_frame, step_ = choice(open_, frame1, frame2, step_, is_enough) #np.random.choice(open_) #
             print(f"selected frame: {selected_frame}")
+            print(point_cloud_builder.ids)
             selected_points_ids = np.intersect1d(point_cloud_builder.ids, corner_storage[selected_frame].ids)
 
             selected_points_3d = [point_cloud_builder.points[np.where(point_cloud_builder.ids == id_)[0]][0] for id_ in
@@ -177,11 +214,22 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
                                   selected_points_ids]
             selected_points_2d = np.array(selected_points_2d)
 
+            #print(f"selected points ids {selected_points_ids}")
+            #if len(selected_points_ids) == 0:
+            #    success = False
+            #    inliers = None
+            # else:
+            #try:
+
+            # ERROR: zero len(selected_points_ids)
             success, rvec, tvec, inliers = cv2.solvePnPRansac(selected_points_3d.astype('float32'),
-                                                              selected_points_2d.astype('float32'),
-                                                              intrinsic_mat, None,
-                                                              reprojectionError=params.max_reprojection_error,
-                                                              confidence=conf)
+                                                      selected_points_2d.astype('float32'),
+                                                      intrinsic_mat, None,
+                                                      reprojectionError=params.max_reprojection_error,
+                                                      confidence=conf)
+            #except cv2.error:
+            #    success = False
+            #    inliers = None
 
             if not(inliers is None):
                 outliers = np.setdiff1d(np.arange(0, len(selected_points_3d)), inliers.T, assume_unique=True)
