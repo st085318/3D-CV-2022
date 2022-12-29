@@ -117,23 +117,23 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat, params):
     cos_ratio = []
     frames_info = []
     step = 10 if len(corner_storage) > 50 else 2
+    #step = 1
 
     for frame1 in range(0, len(corner_storage), step):
         for frame2 in range(frame1 + step, len(corner_storage), step):
 
             corrs = build_correspondences(corner_storage[frame1], corner_storage[frame2])
-            if len(corrs) < 50:
+            if len(corrs.ids) < 100:
                 continue
+
             E, inliers_essential = cv2.findEssentialMat(corrs.points_1, corrs.points_2,
                                                      intrinsic_mat, method=cv2.RANSAC)
             H, inliers_homography = cv2.findHomography(corrs.points_1, corrs.points_2, method=cv2.RANSAC)
 
             if inliers_homography.sum() >= inliers_essential.sum() * 0.7:
                 continue
-            num_inliers, R, t, _ = cv2.recoverPose(E, corrs.points_1, corrs.points_2, intrinsic_mat)
 
-            if num_inliers < 500:
-                continue
+            num_inliers, R, t, _ = cv2.recoverPose(E, corrs.points_1, corrs.points_2, intrinsic_mat)
 
             view_mat_1 = pose_to_view_mat3x4(Pose(r_mat=np.eye(3), t_vec=np.zeros(3)))
             view_mat_2 = pose_to_view_mat3x4(Pose(r_mat=R.T, t_vec=-R.T @ t))
@@ -149,14 +149,14 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat, params):
             if len(ids) < 100:
                 continue
 
-            if median_cos > np.cos(5/180 * np.pi):
+            if median_cos > np.cos(3/180 * np.pi):
                 continue
 
-            inliers_ratio.append(num_inliers)
+            inliers_ratio.append(len(ids))
             cos_ratio.append(median_cos)
             frames_info.append({'frame1': frame1,
                                 'frame2': frame2,
-                                'num_inliers': num_inliers,
+                                'num_ids': len(ids),
                                 'cos': median_cos,
                                 'R': R,
                                 't': t}
@@ -170,7 +170,7 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat, params):
     ranks = []
 
     for info in frames_info:
-        rank = inliers_ratio.index(info['num_inliers']) * cos_ratio.index(info['cos'])
+        rank = (inliers_ratio.index(info['num_ids']) + 1) * (cos_ratio.index(info['cos']) + 1)
         ranks.append(rank)
         if not(rank in ranks_frames):
             ranks_frames[rank] = []
@@ -183,6 +183,7 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat, params):
 
 
     frame1, frame2, R, t = ranks_frames[min_rank][0]
+
 
     known_view_1 = (frame1, Pose(r_mat=np.eye(3, ), t_vec=np.zeros(3, )))
     known_view_2 = (frame2, Pose(R, -R @ t))
@@ -203,12 +204,11 @@ def choice_frame(open_, point_cloud_builder, corner_storage, intrinsic_mat, para
         selected_points_2d = [selected_corners.points[np.where(selected_corners.ids == id_)[0]][0] for id_ in
                               selected_points_ids]
         selected_points_2d = np.array(selected_points_2d)
-
         success, rvec, tvec, inliers = cv2.solvePnPRansac(selected_points_3d.astype('float32'),
-                                                          selected_points_2d.astype('float32'),
-                                                          intrinsic_mat, None,
-                                                          reprojectionError=params.max_reprojection_error,
-                                                          confidence=conf)
+                                                      selected_points_2d.astype('float32'),
+                                                      intrinsic_mat, None,
+                                                      reprojectionError=params.max_reprojection_error,
+                                                      confidence=conf)
         if not success or (inliers is None):
             continue
 
