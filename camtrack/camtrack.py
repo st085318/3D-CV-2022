@@ -249,7 +249,7 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
         rgb_sequence[0].shape[0]
     )
 
-    params = TriangulationParameters(5, 1, 0.01)
+    params = TriangulationParameters(5, 1, 0)
 
     if known_view_1 is None or known_view_2 is None:
         known_view_1, known_view_2 = calc_init_frames(corner_storage, intrinsic_mat, params)

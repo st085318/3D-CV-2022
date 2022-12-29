@@ -52,7 +52,7 @@ def _build_impl(frame_sequence: pims.FramesSequence,
                 builder: _CornerStorageBuilder) -> None:
     image_0 = frame_sequence[0]
     max_quantity_corners = 5000
-    quality_level = 0.15 # 0.001
+    quality_level = 0.05 # 0.001
     min_distance = 7 #10
     size_of_point = 8
     points = cv2.goodFeaturesToTrack(
