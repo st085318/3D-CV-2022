@@ -91,10 +91,10 @@ def triangulate_points_on_multiple_frames(frame_ids: np.ndarray, corner_storage:
 
 # reminder: think about weight
 def get_best_points_for_frames(frame: int, frames: List[int], corner_storage: CornerStorage,
-                              view_mats: List[np.ndarray], intrinsic_mat: np.ndarray, params: TriangulationParameters, recount=False,
-                               weight=5) \
+                              view_mats: List[np.ndarray], intrinsic_mat: np.ndarray, params: TriangulationParameters,
+                               recalc=False, weight=5) \
         -> Tuple[np.ndarray, np.ndarray]:
-    if recount:
+    if recalc:
         print(f"        Retreangulation")
         best_ids, best_points = triangulate_points_on_multiple_frames(np.append(frame, frames), corner_storage, view_mats,
                                                                       intrinsic_mat, params)
@@ -112,37 +112,115 @@ def get_best_points_for_frames(frame: int, frames: List[int], corner_storage: Co
     return best_ids, best_points
 
 
-def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat):
-    ratio = []
+def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat, params):
+    inliers_ratio = []
+    cos_ratio = []
+    frames_info = []
     step = 10 if len(corner_storage) > 50 else 2
 
-    for i in range(0, len(corner_storage), step):
-        frame1 = i
-        for j in range(i + step, len(corner_storage), step):
-            frame2 = j
+    for frame1 in range(0, len(corner_storage), step):
+        for frame2 in range(frame1 + step, len(corner_storage), step):
 
             corrs = build_correspondences(corner_storage[frame1], corner_storage[frame2])
+            if len(corrs) < 50:
+                continue
             E, inliers_essential = cv2.findEssentialMat(corrs.points_1, corrs.points_2,
                                                      intrinsic_mat, method=cv2.RANSAC)
             H, inliers_homography = cv2.findHomography(corrs.points_1, corrs.points_2, method=cv2.RANSAC)
+
             if inliers_homography.sum() >= inliers_essential.sum() * 0.7:
                 continue
-            counts, R, t, _ = cv2.recoverPose(E, corrs.points_1, corrs.points_2, intrinsic_mat)
-            ratio.append((i, j, counts, R, t))
+            num_inliers, R, t, _ = cv2.recoverPose(E, corrs.points_1, corrs.points_2, intrinsic_mat)
 
-    ratio = sorted(ratio, key=lambda x: x[2])
-    for i in range(len(ratio)):
-        if ratio[i][2] == ratio[-1][2]:
-            edge = i
-            break
-    ratio = ratio[edge:]
-    ratio = sorted(ratio, key=lambda x: x[1] - x[0])
-    frame1, frame2, _, R, t = ratio[len(ratio) // 2]
+            if num_inliers < 500:
+                continue
+
+            view_mat_1 = pose_to_view_mat3x4(Pose(r_mat=np.eye(3), t_vec=np.zeros(3)))
+            view_mat_2 = pose_to_view_mat3x4(Pose(r_mat=R.T, t_vec=-R.T @ t))
+
+            _, ids, median_cos = triangulate_correspondences(
+                corrs,
+                view_mat_1,
+                view_mat_2,
+                intrinsic_mat,
+                params
+            )
+
+            if len(ids) < 100:
+                continue
+
+            if median_cos > np.cos(5/180 * np.pi):
+                continue
+
+            inliers_ratio.append(num_inliers)
+            cos_ratio.append(median_cos)
+            frames_info.append({'frame1': frame1,
+                                'frame2': frame2,
+                                'num_inliers': num_inliers,
+                                'cos': median_cos,
+                                'R': R,
+                                't': t}
+                               )
+
+    inliers_ratio = sorted(inliers_ratio, reverse=True)
+    cos_ratio = sorted(cos_ratio)
+
+
+    ranks_frames = {}
+    ranks = []
+
+    for info in frames_info:
+        rank = inliers_ratio.index(info['num_inliers']) * cos_ratio.index(info['cos'])
+        ranks.append(rank)
+        if not(rank in ranks_frames):
+            ranks_frames[rank] = []
+        ranks_frames[rank].append((info['frame1'],
+                                   info['frame2'],
+                                   info['R'],
+                                   info['t']))
+
+    min_rank = sorted(ranks)[0]
+
+
+    frame1, frame2, R, t = ranks_frames[min_rank][0]
 
     known_view_1 = (frame1, Pose(r_mat=np.eye(3, ), t_vec=np.zeros(3, )))
     known_view_2 = (frame2, Pose(R, -R @ t))
 
     return known_view_1, known_view_2
+
+
+def choice_frame(open_, point_cloud_builder, corner_storage, intrinsic_mat, params, conf=0.999, hope=True):
+    best = {'frame': None, 'inliers': [], 'rvec': None, 'tvec': None}
+    for frame in open_:
+        selected_points_ids = np.intersect1d(point_cloud_builder.ids, corner_storage[frame].ids)
+        if len(selected_points_ids) < 10 and len(open_) > 1 and hope:
+            continue
+        selected_points_3d = [point_cloud_builder.points[np.where(point_cloud_builder.ids == id_)[0]][0] for id_ in
+                              selected_points_ids]
+        selected_points_3d = np.array(selected_points_3d)
+        selected_corners = corner_storage[frame]
+        selected_points_2d = [selected_corners.points[np.where(selected_corners.ids == id_)[0]][0] for id_ in
+                              selected_points_ids]
+        selected_points_2d = np.array(selected_points_2d)
+
+        success, rvec, tvec, inliers = cv2.solvePnPRansac(selected_points_3d.astype('float32'),
+                                                          selected_points_2d.astype('float32'),
+                                                          intrinsic_mat, None,
+                                                          reprojectionError=params.max_reprojection_error,
+                                                          confidence=conf)
+        if not success or (inliers is None):
+            continue
+
+        if len(best['inliers']) < len(inliers):
+            best['frame'] = frame
+            best['inliers'] = inliers
+            best['rvec'] = rvec
+            best['tvec'] = tvec
+    #print(f"BEST FRAME: {best}")
+    if best['frame'] is None and hope:
+        return choice_frame(open_, point_cloud_builder, corner_storage, intrinsic_mat, params, hope=False)
+    return best['frame'], best['inliers'], best['rvec'], best['tvec']
 
 
 def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: CornerStorage, frame_sequence_path: str,
@@ -153,118 +231,63 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
         camera_parameters,
         rgb_sequence[0].shape[0]
     )
+
+    params = TriangulationParameters(4, 1, 0)
+
     if known_view_1 is None or known_view_2 is None:
-        known_view_1, known_view_2 = calc_init_frames(corner_storage, intrinsic_mat)
+        known_view_1, known_view_2 = calc_init_frames(corner_storage, intrinsic_mat, params)
 
     frame1, frame2 = known_view_1[0], known_view_2[0]
-    print(frame1)
-    print(frame2)
+    print(f"FRAME1: {frame1}")
+    print(f"FRAME2: {frame2}")
     close = [frame1, frame2]
     open = np.delete(np.arange(len(corner_storage)), close)
     view_mats = np.full(len(corner_storage), None)
     view_known_1, view_known_2 = pose_to_view_mat3x4(known_view_1[1]), pose_to_view_mat3x4(known_view_2[1])
     view_mats[close] = view_known_1, view_known_2
 
-    params = TriangulationParameters(1, 5, 0)
+
 
     correspondences = build_correspondences(corner_storage[frame1], corner_storage[frame2])
     points_3d, correspondence_ids, med_cos = triangulate_correspondences(correspondences, view_known_1, view_known_2,
                                                                          intrinsic_mat, params)
     point_cloud_builder = PointCloudBuilder(correspondence_ids, points_3d)
-
-    def choice(open_, f1, f2, step=(frame2 - frame1) // 2 if (frame2 - frame1) > 15 else 7, is_enough=0):
-        if is_enough:
-            return open_[0], step
-        f1, f2 = min(f1, f2), max(f1, f2)
-        lf1, rf1 = max(0, f1), min(len(open_) - 1, f1 + step)
-        lf2, rf2 = max(0, f2 - step), min(len(open_) - 1, f2)
-        diff1 = np.setdiff1d(np.arange(lf1, rf1), open_)
-        inte1 = np.intersect1d(np.arange(lf1, rf1), open_)
-        diff2 = np.setdiff1d(np.arange(lf2, rf2), open_)
-        inte2 = np.intersect1d(np.arange(lf2, rf2), open_)
-        if 2 * (len(diff1) + len(diff2)) > rf1 + rf2 - lf1 - lf2:
-            step *= 2
-        choi1 = np.setdiff1d(inte1, diff1)
-        choi2 = np.setdiff1d(inte2, diff2)
-        if len(choi1) == 0:
-            if len(choi2) == 0:
-                return np.random.choice(open_), 2*step
-            return np.random.choice(choi2), step
-        return np.random.choice(np.append(choi1, choi2)), step
-
-    conf = 0.99
-    is_enough = 0
     delta_rec = 0
+    recalc = False
     while len(open) > 0:
+        delta_rec += 1
         open_ = copy.deepcopy(open)
-        recount = False
-        success = False
-        step_ = abs(frame2 - frame1) // 2
-        while not success and len(open_) > 0:
-            selected_frame, step_ = choice(open_, frame1, frame2, step_, is_enough) #np.random.choice(open_) #
-            print(f"selected frame: {selected_frame}")
-            print(point_cloud_builder.ids)
-            selected_points_ids = np.intersect1d(point_cloud_builder.ids, corner_storage[selected_frame].ids)
 
-            selected_points_3d = [point_cloud_builder.points[np.where(point_cloud_builder.ids == id_)[0]][0] for id_ in
-                                  selected_points_ids]
-            selected_points_3d = np.array(selected_points_3d)
-            selected_corners = corner_storage[selected_frame]
-            selected_points_2d = [selected_corners.points[np.where(selected_corners.ids == id_)[0]][0] for id_ in
-                                  selected_points_ids]
-            selected_points_2d = np.array(selected_points_2d)
-
-            #print(f"selected points ids {selected_points_ids}")
-            #if len(selected_points_ids) == 0:
-            #    success = False
-            #    inliers = None
-            # else:
-            #try:
-
-            # ERROR: zero len(selected_points_ids)
-            success, rvec, tvec, inliers = cv2.solvePnPRansac(selected_points_3d.astype('float32'),
-                                                      selected_points_2d.astype('float32'),
-                                                      intrinsic_mat, None,
-                                                      reprojectionError=params.max_reprojection_error,
-                                                      confidence=conf)
-            #except cv2.error:
-            #    success = False
-            #    inliers = None
-
-            if not(inliers is None):
-                outliers = np.setdiff1d(np.arange(0, len(selected_points_3d)), inliers.T, assume_unique=True)
-                if len(outliers) > 0.2 * len(selected_points_3d) and delta_rec >= 0.2 * (len(open) + len(close)) and success:
-                    recount = True
-                    delta_rec = 0
-                #if is_enough:
-                # point_cloud_builder.remove_points(outliers)
-                point_cloud_builder.remove_points(outliers)
-
-            if success:
-                print(f"    success: {selected_frame}")
-                conf = 0.99
-                is_enough = 0
-                view_mats[selected_frame] = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
-                ids, points3d = get_best_points_for_frames(selected_frame, close, corner_storage, view_mats,
-                                                          intrinsic_mat, params, recount)
-                delta_rec += 1
-                point_cloud_builder.add_points(ids, points3d)
-
-            else:
-                print(f"    not success: {selected_frame}")
-                print(f"    progress: {len(close)} / {len(open) + len(close)}")
-                open_ = np.delete(open_, np.where(open_ == selected_frame))
-
-        if len(open_) == 0 and not success:
-            if not(is_enough):
-                is_enough = 1
-                open_ = copy.deepcopy(open)
-                continue
-            if conf > 0.1:
-                conf -= 0.05
-                continue
-            print("SOMETHING WENT WRONG :(")
+        selected_frame, inliers, rvec, tvec = choice_frame(open_, point_cloud_builder, corner_storage,
+                                                           intrinsic_mat, params)
+        if selected_frame is None:
+            print('ERROR NO SELECTED FRAME')
             break
+        selected_points_ids = np.intersect1d(point_cloud_builder.ids,
+                                             corner_storage[selected_frame].ids)
+
+        selected_points_3d = [point_cloud_builder.points[np.where(point_cloud_builder.ids == id_)[0]][0] for id_ in
+                              selected_points_ids]
+
+        print(f"selected frame: {selected_frame}")
+        #print(point_cloud_builder.ids)
+
+        outliers = np.setdiff1d(np.arange(0, len(selected_points_3d)), inliers.T,
+                                assume_unique=True)
+        print(f"    OUTLIERS: {outliers}")
+        if len(outliers) > 0.2 * len(selected_points_3d) and delta_rec >= 0.2 * (len(open) + len(close)):
+            recalc = True
+            delta_rec = 0
+        point_cloud_builder.remove_points(outliers)
+
+        print(f"    success: {selected_frame}")
+        is_enough = 0
+        view_mats[selected_frame] = rodrigues_and_translation_to_view_mat3x4(rvec, tvec)
+        ids, points3d = get_best_points_for_frames(selected_frame, close, corner_storage,
+                                                   view_mats, intrinsic_mat, params, recalc)
+        recalc = False
+        delta_rec += 1
+        point_cloud_builder.add_points(ids, points3d)
 
         is_enough = 0
         print(f"{len(close)} / {len(open) + len(close)} frames done")
@@ -294,5 +317,4 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
 if __name__ == '__main__':
     # pylint:disable=no-value-for-parameter
     create_cli(track_and_calc_colors)()
-
 
