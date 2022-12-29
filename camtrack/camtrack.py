@@ -138,7 +138,7 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat, params):
             view_mat_1 = pose_to_view_mat3x4(Pose(r_mat=np.eye(3), t_vec=np.zeros(3)))
             view_mat_2 = pose_to_view_mat3x4(Pose(r_mat=R.T, t_vec=-R.T @ t))
 
-            _, ids, median_cos = triangulate_correspondences(
+            _ , ids, median_cos = triangulate_correspondences(
                 corrs,
                 view_mat_1,
                 view_mat_2,
@@ -175,18 +175,35 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat, params):
         if not(rank in ranks_frames):
             ranks_frames[rank] = []
         ranks_frames[rank].append((info['frame1'],
-                                   info['frame2'],
-                                   info['R'],
-                                   info['t']))
+                                   info['frame2']))
 
     min_rank = sorted(ranks)[0]
 
 
-    frame1, frame2, R, t = ranks_frames[min_rank][0]
+    frame1, frame2= ranks_frames[min_rank][0]
+
+    corrs = build_correspondences(corner_storage[frame1], corner_storage[frame2])
+
+    E, inliers_essential = cv2.findEssentialMat(corrs.points_1, corrs.points_2,
+                                                intrinsic_mat, method=cv2.RANSAC)
+    H, inliers_homography = cv2.findHomography(corrs.points_1, corrs.points_2, method=cv2.RANSAC)
 
 
-    known_view_1 = (frame1, Pose(r_mat=np.eye(3, ), t_vec=np.zeros(3, )))
-    known_view_2 = (frame2, Pose(R, -R @ t))
+    num_inliers, R, t, _ = cv2.recoverPose(E, corrs.points_1, corrs.points_2, intrinsic_mat)
+
+    view_mat_1 = pose_to_view_mat3x4(Pose(r_mat=np.eye(3), t_vec=np.zeros(3)))
+    view_mat_2 = pose_to_view_mat3x4(Pose(r_mat=R.T, t_vec=-R.T @ t))
+
+    _, ids, median_cos = triangulate_correspondences(
+        corrs,
+        view_mat_1,
+        view_mat_2,
+        intrinsic_mat,
+        params
+    )
+    #print(ids)
+    known_view_1 = (frame1, view_mat_1)
+    known_view_2 = (frame2, view_mat_2)
 
     return known_view_1, known_view_2
 
@@ -232,10 +249,13 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
         rgb_sequence[0].shape[0]
     )
 
-    params = TriangulationParameters(4, 1, 0)
+    params = TriangulationParameters(5, 1, 0.01)
 
     if known_view_1 is None or known_view_2 is None:
         known_view_1, known_view_2 = calc_init_frames(corner_storage, intrinsic_mat, params)
+        view_known_1, view_known_2 = known_view_1[1], known_view_2[1]
+    else:
+        view_known_1, view_known_2 = pose_to_view_mat3x4(known_view_1[1]), pose_to_view_mat3x4(known_view_2[1])
 
     frame1, frame2 = known_view_1[0], known_view_2[0]
     print(f"FRAME1: {frame1}")
@@ -243,14 +263,14 @@ def track_and_calc_colors(camera_parameters: CameraParameters, corner_storage: C
     close = [frame1, frame2]
     open = np.delete(np.arange(len(corner_storage)), close)
     view_mats = np.full(len(corner_storage), None)
-    view_known_1, view_known_2 = pose_to_view_mat3x4(known_view_1[1]), pose_to_view_mat3x4(known_view_2[1])
-    view_mats[close] = view_known_1, view_known_2
 
+    view_mats[close] = view_known_1, view_known_2
 
 
     correspondences = build_correspondences(corner_storage[frame1], corner_storage[frame2])
     points_3d, correspondence_ids, med_cos = triangulate_correspondences(correspondences, view_known_1, view_known_2,
                                                                          intrinsic_mat, params)
+    #print(points_3d)
     point_cloud_builder = PointCloudBuilder(correspondence_ids, points_3d)
     delta_rec = 0
     recalc = False
