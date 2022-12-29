@@ -123,7 +123,7 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat, params):
         for frame2 in range(frame1 + step, len(corner_storage), step):
 
             corrs = build_correspondences(corner_storage[frame1], corner_storage[frame2])
-            if len(corrs.ids) < 100:
+            if len(corrs.ids) < 30:
                 continue
 
             E, inliers_essential = cv2.findEssentialMat(corrs.points_1, corrs.points_2,
@@ -146,10 +146,10 @@ def calc_init_frames(corner_storage: CornerStorage, intrinsic_mat, params):
                 params
             )
 
-            if len(ids) < 100:
+            if len(ids) < 50:
                 continue
 
-            if median_cos > np.cos(3/180 * np.pi):
+            if median_cos > np.cos(4/180 * np.pi):
                 continue
 
             inliers_ratio.append(len(ids))
